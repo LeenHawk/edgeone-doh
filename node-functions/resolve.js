@@ -1,9 +1,12 @@
 // functions/resolve.js
 const GOOGLE_DOH_JSON = 'https://dns.google/resolve';
+const CF_DOH_JSON = 'https://cloudflare-dns.com/dns-query';
+const QUAD9_DOH_JSON = 'https://dns.quad9.net/dns-query';
+const DNSPOD_DOH_JSON = 'https://doh.pub/dns-query';
 const V4_PREFIX = 24;
 const V6_PREFIX = 56;
 
-export async function onRequestGet({ request, clientIp }) {
+export async function onRequestGet({ request, clientIp, env }) {
   const rawUrl = request && request.url ? String(request.url) : '';
   let url;
   try {
@@ -19,15 +22,35 @@ export async function onRequestGet({ request, clientIp }) {
 
   // 生成 edns_client_subnet=addr/prefix
   const ecs = buildEcsParam(ip);
-  const fwd = new URL(GOOGLE_DOH_JSON);
+  const upstreams = getJsonUpstreams(env);
+  const fwd = new URL(upstreams[0]);
   url.searchParams.forEach((v, k) => fwd.searchParams.set(k, v));
   if (ecs) fwd.searchParams.set('edns_client_subnet', ecs);
 
   const outHeaders = new Headers();
   const accept = readHeader(request && request.headers, 'Accept');
-  if (accept) outHeaders.set('Accept', accept);
+  if (accept && /application\/dns-json/i.test(accept)) outHeaders.set('Accept', accept);
+  else outHeaders.set('Accept', 'application/dns-json');
 
-  const resp = await fetch(fwd.toString(), { method: 'GET', headers: outHeaders, redirect: 'follow' });
+  const offline = (env && env.DEV_OFFLINE) || (typeof process!=='undefined' && process.env && process.env.DEV_OFFLINE);
+  if (offline) {
+    const qname = url.searchParams.get('name') || '';
+    const qtype = parseInt(url.searchParams.get('type') || '1', 10);
+    const body = {
+      Status: 0, TC: false, RD: true, RA: true, AD: false, CD: false,
+      Question: qname ? [{ name: qname, type: qtype }] : [],
+      Answer: [],
+      Comment: 'DEV_OFFLINE mock',
+    };
+    const h = new Headers();
+    if (ecs) h.set('X-ECS', ecs);
+    h.set('Access-Control-Allow-Origin', '*');
+    h.set('Access-Control-Expose-Headers', 'X-ECS');
+    h.set('content-type', 'application/dns-json');
+    return new Response(JSON.stringify(body), { status: 200, headers: h });
+  }
+
+  const resp = await fetchWithFallback(upstreams, fwd.search, { method: 'GET', headers: outHeaders, redirect: 'follow' });
   const h = new Headers(resp.headers);
   if (ecs) h.set('X-ECS', ecs);
   h.set('Access-Control-Allow-Origin', '*');
@@ -71,4 +94,31 @@ function readHeader(headers, name){
     if (Array.isArray(v)) return v[0] || '';
     return typeof v === 'string' ? v : '';
   }catch{ return ''; }
+}
+
+function getJsonUpstreams(env){
+  const u = [];
+  const envVal = (env && env.UPSTREAM_JSON) || (typeof process!=='undefined' && process.env && process.env.UPSTREAM_JSON) || '';
+  if (envVal) u.push(envVal);
+  u.push(GOOGLE_DOH_JSON);
+  u.push(CF_DOH_JSON);
+  u.push(QUAD9_DOH_JSON);
+  u.push(DNSPOD_DOH_JSON);
+  return Array.from(new Set(u));
+}
+
+async function fetchWithFallback(baseList, search, init){
+  let lastErr;
+  for (const base of baseList){
+    try{
+      const url = base.includes('?') ? base + '&' + search.replace(/^\?/,'') : base + search;
+      const ctrl = new AbortController();
+      const to = setTimeout(()=>ctrl.abort(new Error('timeout')), 2000);
+      const r = await fetch(url, { ...init, signal: ctrl.signal });
+      clearTimeout(to);
+      if (r.ok) return r;
+      lastErr = new Error(`upstream ${base} status ${r.status}`);
+    }catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error('all upstreams failed');
 }

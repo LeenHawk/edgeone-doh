@@ -1,9 +1,12 @@
 // functions/dns-query.js
 const GOOGLE_DOH_BINARY = 'https://dns.google/dns-query';
+const CF_DOH_BINARY = 'https://cloudflare-dns.com/dns-query';
+const QUAD9_DOH_BINARY = 'https://dns.quad9.net/dns-query';
+const DNSPOD_DOH_BINARY = 'https://doh.pub/dns-query';
 const V4_PREFIX = 24;
 const V6_PREFIX = 56;
 
-export async function onRequestGet({ request, clientIp }) {
+export async function onRequestGet({ request, clientIp, env }) {
   const rawUrl = request && request.url ? String(request.url) : '';
   let url;
   try {
@@ -14,16 +17,16 @@ export async function onRequestGet({ request, clientIp }) {
   const dnsParam = url.searchParams.get('dns');
   if (!dnsParam) return new Response('missing dns param', { status: 400 });
   const dnsBytes = base64UrlToBytes(dnsParam);
-  return proxyWithECS({ request, clientIp }, dnsBytes);
+  return proxyWithECS({ request, clientIp, env }, dnsBytes);
 }
 
-export async function onRequestPost({ request, clientIp }) {
+export async function onRequestPost({ request, clientIp, env }) {
   const ct = readHeader(request && request.headers, 'content-type') || '';
   if (!ct.includes('application/dns-message')) {
     return new Response('unsupported content-type', { status: 415 });
   }
   const dnsBytes = new Uint8Array(await request.arrayBuffer());
-  return proxyWithECS({ request, clientIp }, dnsBytes);
+  return proxyWithECS({ request, clientIp, env }, dnsBytes);
 }
 
 export async function onRequestOptions() {
@@ -35,7 +38,7 @@ export async function onRequestOptions() {
 }
 
 async function proxyWithECS(ctx, dnsBytes) {
-  const { request, clientIp } = ctx;
+  const { request, clientIp, env } = ctx;
   const ip =
     (clientIp && String(clientIp).trim()) ||
     readHeader(request && request.headers, 'EO-Connecting-IP')?.trim() ||
@@ -51,12 +54,23 @@ async function proxyWithECS(ctx, dnsBytes) {
   outHeaders.set('Accept', 'application/dns-message');
   outHeaders.set('Content-Type', 'application/dns-message');
 
-  const upstream = await fetch(GOOGLE_DOH_BINARY, {
-    method: 'POST',
-    headers: outHeaders,
-    body: patched,
-    redirect: 'follow',
-  });
+  const offline = (env && env.DEV_OFFLINE) || (typeof process!=='undefined' && process.env && process.env.DEV_OFFLINE);
+  let upstream;
+  if (offline) {
+    // 返回空的成功响应，便于本地联调（非真实解析结果）
+    upstream = new Response(new Uint8Array(0), {
+      status: 200,
+      headers: { 'content-type': 'application/dns-message' }
+    });
+  } else {
+    const upstreams = getBinaryUpstreams(env);
+    upstream = await fetchBinaryWithFallback(upstreams, {
+      method: 'POST',
+      headers: outHeaders,
+      body: patched,
+      redirect: 'follow',
+    });
+  }
 
   const h = new Headers(upstream.headers);
   // 回显当前注入的 ECS 前缀，便于观测
@@ -244,6 +258,31 @@ function bytesToIpv6(bytes) {
   return words.map(w=>w.replace(/^0+/,'')||'0').join(':');
 }
 
+function getBinaryUpstreams(env){
+  const u = [];
+  const envVal = (env && env.UPSTREAM_BINARY) || (typeof process!=='undefined' && process.env && process.env.UPSTREAM_BINARY) || '';
+  if (envVal) u.push(envVal);
+  u.push(GOOGLE_DOH_BINARY);
+  u.push(CF_DOH_BINARY);
+  u.push(QUAD9_DOH_BINARY);
+  u.push(DNSPOD_DOH_BINARY);
+  return Array.from(new Set(u));
+}
+
+async function fetchBinaryWithFallback(list, init){
+  let lastErr;
+  for (const url of list){
+    try{
+      const ctrl = new AbortController();
+      const to = setTimeout(()=>ctrl.abort(new Error('timeout')), 2000);
+      const r = await fetch(url, { ...init, signal: ctrl.signal });
+      clearTimeout(to);
+      if (r.ok) return r;
+      lastErr = new Error(`upstream ${url} status ${r.status}`);
+    }catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error('all upstreams failed');
+}
 function getBaseFromHeaders(headers){
   try{
     const proto=(readHeader(headers,'x-forwarded-proto')||'https').split(',')[0].trim()||'https';
