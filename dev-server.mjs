@@ -27,7 +27,9 @@ function buildWebRequest(req) {
   const url = `http://localhost:${PORT}${req.url}`;
   const init = { method: req.method, headers: toWebHeaders(req.headers) };
   if (!['GET', 'HEAD'].includes(req.method)) {
-    init.body = req; // Node stream, Request can consume it
+    init.body = req; // Node stream, pass-through
+    // Node.js fetch requires duplex when body is a stream
+    init.duplex = 'half';
   }
   return new Request(url, init);
 }
@@ -42,7 +44,7 @@ async function sendWebResponse(nodeRes, webRes) {
 const server = http.createServer(async (req, res) => {
   try {
     const request = buildWebRequest(req);
-    const ctx = { request, clientIp: getClientIp(req) };
+    const ctx = { request, clientIp: getClientIp(req), env: process.env };
     const { pathname } = new URL(request.url);
 
     if (pathname === '/resolve' && req.method === 'GET') {
@@ -76,4 +78,3 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`Dev server listening on http://localhost:${PORT}`);
 });
-

@@ -1,8 +1,6 @@
 // functions/resolve.js
 const GOOGLE_DOH_JSON = 'https://dns.google/resolve';
-const CF_DOH_JSON = 'https://cloudflare-dns.com/dns-query';
-const QUAD9_DOH_JSON = 'https://dns.quad9.net/dns-query';
-const DNSPOD_DOH_JSON = 'https://doh.pub/dns-query';
+const CF_DOH_JSON = 'https://cloudflare-dns.com/dns-query?ct=application%2Fdns-json';
 const V4_PREFIX = 24;
 const V6_PREFIX = 56;
 
@@ -26,6 +24,9 @@ export async function onRequestGet({ request, clientIp, env }) {
   const fwd = new URL(upstreams[0]);
   url.searchParams.forEach((v, k) => fwd.searchParams.set(k, v));
   if (ecs) fwd.searchParams.set('edns_client_subnet', ecs);
+  // 备份一个不带 ECS 的 search，供 4xx/5xx 回退使用
+  const fwdNoEcs = new URL(upstreams[0]);
+  url.searchParams.forEach((v, k) => fwdNoEcs.searchParams.set(k, v));
 
   const outHeaders = new Headers();
   const accept = readHeader(request && request.headers, 'Accept');
@@ -50,11 +51,18 @@ export async function onRequestGet({ request, clientIp, env }) {
     return new Response(JSON.stringify(body), { status: 200, headers: h });
   }
 
-  const resp = await fetchWithFallback(upstreams, fwd.search, { method: 'GET', headers: outHeaders, redirect: 'follow' });
+  let resp;
+  try {
+    resp = await fetchWithFallback(upstreams, fwd.search, { method: 'GET', headers: outHeaders, redirect: 'follow' });
+  } catch (e) {
+    // 带 ECS 失败则回退为不带 ECS 的查询
+    resp = await fetchWithFallback(upstreams, fwdNoEcs.search, { method: 'GET', headers: outHeaders, redirect: 'follow' });
+  }
   const h = new Headers(resp.headers);
   if (ecs) h.set('X-ECS', ecs);
   h.set('Access-Control-Allow-Origin', '*');
   h.set('Access-Control-Expose-Headers', 'X-ECS');
+  h.set('Cache-Control', 'no-store');
   return new Response(resp.body, { status: resp.status, headers: h });
 }
 
@@ -100,10 +108,9 @@ function getJsonUpstreams(env){
   const u = [];
   const envVal = (env && env.UPSTREAM_JSON) || (typeof process!=='undefined' && process.env && process.env.UPSTREAM_JSON) || '';
   if (envVal) u.push(envVal);
+  // 仅使用明确支持 JSON 的上游
   u.push(GOOGLE_DOH_JSON);
-  u.push(CF_DOH_JSON);
-  u.push(QUAD9_DOH_JSON);
-  u.push(DNSPOD_DOH_JSON);
+  // u.push(CF_DOH_JSON);
   return Array.from(new Set(u));
 }
 

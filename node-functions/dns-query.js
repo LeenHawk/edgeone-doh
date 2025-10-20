@@ -34,6 +34,7 @@ export async function onRequestOptions() {
   h.set('Access-Control-Allow-Origin', '*');
   h.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   h.set('Access-Control-Allow-Headers', 'content-type');
+  h.set('Cache-Control', 'no-store');
   return new Response(null, { status: 204, headers: h });
 }
 
@@ -46,8 +47,9 @@ async function proxyWithECS(ctx, dnsBytes) {
     '';
 
   // 构造 ECS option 并注入/更新到 DNS 报文
-  const ecsOpt = buildEcsOption(ip, V4_PREFIX, V6_PREFIX);
-  const patched = injectEcsIntoDnsMessage(dnsBytes, ecsOpt);
+  const disableEcs = !!((env && env.DISABLE_ECS) || (typeof process!=='undefined' && process.env && process.env.DISABLE_ECS));
+  const ecsOpt = disableEcs ? new Uint8Array(0) : buildEcsOption(ip, V4_PREFIX, V6_PREFIX);
+  const patched = disableEcs ? dnsBytes : injectEcsIntoDnsMessage(dnsBytes, ecsOpt);
 
   // 统一用 POST 更稳（规避 GET 414 URI Too Long），并最小化 HTTP 头（Host/Content-Type/Accept）。:contentReference[oaicite:3]{index=3}
   const outHeaders = new Headers();
@@ -64,12 +66,24 @@ async function proxyWithECS(ctx, dnsBytes) {
     });
   } else {
     const upstreams = getBinaryUpstreams(env);
-    upstream = await fetchBinaryWithFallback(upstreams, {
-      method: 'POST',
-      headers: outHeaders,
-      body: patched,
-      redirect: 'follow',
-    });
+    try {
+      upstream = await fetchBinaryWithFallback(upstreams, {
+        method: 'POST',
+        headers: outHeaders,
+        body: patched,
+        redirect: 'follow',
+      });
+      if (!upstream.ok) throw new Error('upstream not ok: ' + upstream.status);
+    } catch (e) {
+      // 带 ECS 失败则回退为原始报文，避免客户端解析失败导致“断网”
+      const r2 = await fetchBinaryWithFallback(upstreams, {
+        method: 'POST',
+        headers: outHeaders,
+        body: dnsBytes,
+        redirect: 'follow',
+      });
+      upstream = addHeader(r2, 'X-ECS-Fallback', '1');
+    }
   }
 
   const h = new Headers(upstream.headers);
@@ -78,6 +92,9 @@ async function proxyWithECS(ctx, dnsBytes) {
     const ecsHuman = ecsOptionToHuman(ecsOpt);
     if (ecsHuman) h.set('X-ECS', ecsHuman);
   }
+  if (disableEcs) h.set('X-ECS-Disabled', '1');
+  h.set('Cache-Control', 'no-store');
+  h.set('Content-Type', 'application/dns-message');
   h.set('Access-Control-Allow-Origin', '*');
   h.set('Access-Control-Expose-Headers', 'X-ECS');
   return new Response(upstream.body, { status: upstream.status, headers: h });
@@ -263,9 +280,9 @@ function getBinaryUpstreams(env){
   const envVal = (env && env.UPSTREAM_BINARY) || (typeof process!=='undefined' && process.env && process.env.UPSTREAM_BINARY) || '';
   if (envVal) u.push(envVal);
   u.push(GOOGLE_DOH_BINARY);
-  u.push(CF_DOH_BINARY);
-  u.push(QUAD9_DOH_BINARY);
-  u.push(DNSPOD_DOH_BINARY);
+  // u.push(CF_DOH_BINARY);
+  // u.push(QUAD9_DOH_BINARY);
+  // u.push(DNSPOD_DOH_BINARY);
   return Array.from(new Set(u));
 }
 
@@ -300,4 +317,14 @@ function readHeader(headers, name){
     if (Array.isArray(v)) return v[0] || '';
     return typeof v === 'string' ? v : '';
   }catch{ return ''; }
+}
+
+function addHeader(resp, key, val) {
+  try {
+    const h = new Headers(resp.headers);
+    h.set(key, val);
+    return new Response(resp.body, { status: resp.status, headers: h });
+  } catch {
+    return resp;
+  }
 }
