@@ -9,12 +9,12 @@ export async function onRequestGet({ request, clientIp }) {
   try {
     url = new URL(rawUrl);
   } catch {
-    url = new URL(rawUrl || '/', getBaseFromHeaders(request.headers));
+    url = new URL(rawUrl || '/', getBaseFromHeaders(request && request.headers));
   }
   const ip =
     (clientIp && String(clientIp).trim()) ||
-    request.headers.get('EO-Connecting-IP')?.trim() ||
-    request.headers.get('eo-connecting-ip')?.trim() ||
+    readHeader(request && request.headers, 'EO-Connecting-IP')?.trim() ||
+    readHeader(request && request.headers, 'eo-connecting-ip')?.trim() ||
     '';
 
   // 生成 edns_client_subnet=addr/prefix
@@ -24,7 +24,7 @@ export async function onRequestGet({ request, clientIp }) {
   if (ecs) fwd.searchParams.set('edns_client_subnet', ecs);
 
   const outHeaders = new Headers();
-  const accept = request.headers.get('Accept');
+  const accept = readHeader(request && request.headers, 'Accept');
   if (accept) outHeaders.set('Accept', accept);
 
   const resp = await fetch(fwd.toString(), { method: 'GET', headers: outHeaders, redirect: 'follow' });
@@ -56,8 +56,19 @@ function maskIPv6ToPrefix(ip,prefix){const b=ipv6ToBytes(ip);if(!b)return'';cons
 
 function getBaseFromHeaders(headers){
   try{
-    const proto=(headers.get('x-forwarded-proto')||headers.get('X-Forwarded-Proto')||'https').split(',')[0].trim()||'https';
-    const host=(headers.get('host')||headers.get('Host')||headers.get('x-forwarded-host')||'').split(',')[0].trim()||'localhost';
+    const proto=(readHeader(headers,'x-forwarded-proto')||'https').split(',')[0].trim()||'https';
+    const host=(readHeader(headers,'host')||readHeader(headers,'x-forwarded-host')||'').split(',')[0].trim()||'localhost';
     return `${proto}://${host}`;
   }catch{ return 'https://localhost'; }
+}
+
+function readHeader(headers, name){
+  if (!headers) return '';
+  try{
+    if (typeof headers.get === 'function') return headers.get(name) || headers.get(name.toLowerCase()) || '';
+    const key = String(name).toLowerCase();
+    const v = headers[key];
+    if (Array.isArray(v)) return v[0] || '';
+    return typeof v === 'string' ? v : '';
+  }catch{ return ''; }
 }

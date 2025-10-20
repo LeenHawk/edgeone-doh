@@ -9,7 +9,7 @@ export async function onRequestGet({ request, clientIp }) {
   try {
     url = new URL(rawUrl);
   } catch {
-    url = new URL(rawUrl || '/', getBaseFromHeaders(request.headers));
+    url = new URL(rawUrl || '/', getBaseFromHeaders(request && request.headers));
   }
   const dnsParam = url.searchParams.get('dns');
   if (!dnsParam) return new Response('missing dns param', { status: 400 });
@@ -18,7 +18,7 @@ export async function onRequestGet({ request, clientIp }) {
 }
 
 export async function onRequestPost({ request, clientIp }) {
-  const ct = request.headers.get('content-type') || '';
+  const ct = readHeader(request && request.headers, 'content-type') || '';
   if (!ct.includes('application/dns-message')) {
     return new Response('unsupported content-type', { status: 415 });
   }
@@ -38,8 +38,8 @@ async function proxyWithECS(ctx, dnsBytes) {
   const { request, clientIp } = ctx;
   const ip =
     (clientIp && String(clientIp).trim()) ||
-    request.headers.get('EO-Connecting-IP')?.trim() ||
-    request.headers.get('eo-connecting-ip')?.trim() ||
+    readHeader(request && request.headers, 'EO-Connecting-IP')?.trim() ||
+    readHeader(request && request.headers, 'eo-connecting-ip')?.trim() ||
     '';
 
   // 构造 ECS option 并注入/更新到 DNS 报文
@@ -246,8 +246,19 @@ function bytesToIpv6(bytes) {
 
 function getBaseFromHeaders(headers){
   try{
-    const proto=(headers.get('x-forwarded-proto')||headers.get('X-Forwarded-Proto')||'https').split(',')[0].trim()||'https';
-    const host=(headers.get('host')||headers.get('Host')||headers.get('x-forwarded-host')||'').split(',')[0].trim()||'localhost';
+    const proto=(readHeader(headers,'x-forwarded-proto')||'https').split(',')[0].trim()||'https';
+    const host=(readHeader(headers,'host')||readHeader(headers,'x-forwarded-host')||'').split(',')[0].trim()||'localhost';
     return `${proto}://${host}`;
   }catch{ return 'https://localhost'; }
+}
+
+function readHeader(headers, name){
+  if (!headers) return '';
+  try{
+    if (typeof headers.get === 'function') return headers.get(name) || headers.get(name.toLowerCase()) || '';
+    const key = String(name).toLowerCase();
+    const v = headers[key];
+    if (Array.isArray(v)) return v[0] || '';
+    return typeof v === 'string' ? v : '';
+  }catch{ return ''; }
 }
