@@ -3,32 +3,41 @@ const GOOGLE_DOH_BINARY = 'https://dns.google/dns-query';
 const V4_PREFIX = 24;
 const V6_PREFIX = 56;
 
-export async function onRequestGet({ request }) {
+export async function onRequestGet({ request, clientIp }) {
   const url = new URL(request.url);
   const dnsParam = url.searchParams.get('dns');
   if (!dnsParam) return new Response('missing dns param', { status: 400 });
   const dnsBytes = base64UrlToBytes(dnsParam);
-  return proxyWithECS(request, dnsBytes);
+  return proxyWithECS({ request, clientIp }, dnsBytes);
 }
 
-export async function onRequestPost({ request }) {
+export async function onRequestPost({ request, clientIp }) {
   const ct = request.headers.get('content-type') || '';
   if (!ct.includes('application/dns-message')) {
     return new Response('unsupported content-type', { status: 415 });
   }
   const dnsBytes = new Uint8Array(await request.arrayBuffer());
-  return proxyWithECS(request, dnsBytes);
+  return proxyWithECS({ request, clientIp }, dnsBytes);
 }
 
-async function proxyWithECS(request, dnsBytes) {
-  const clientIp =
+export async function onRequestOptions() {
+  const h = new Headers();
+  h.set('Access-Control-Allow-Origin', '*');
+  h.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  h.set('Access-Control-Allow-Headers', 'content-type');
+  return new Response(null, { status: 204, headers: h });
+}
+
+async function proxyWithECS(ctx, dnsBytes) {
+  const { request, clientIp } = ctx;
+  const ip =
+    (clientIp && String(clientIp).trim()) ||
     request.headers.get('EO-Connecting-IP')?.trim() ||
     request.headers.get('eo-connecting-ip')?.trim() ||
-    (request.eo && request.eo.clientIp) || ''; // Pages/边缘函数运行时可直接取 clientIp 属性
-  // 注：EO-Connecting-IP 是 EdgeOne 默认回源头；函数侧没有时用 request.eo.clientIp 更稳。:contentReference[oaicite:2]{index=2}
+    '';
 
   // 构造 ECS option 并注入/更新到 DNS 报文
-  const ecsOpt = buildEcsOption(clientIp, V4_PREFIX, V6_PREFIX);
+  const ecsOpt = buildEcsOption(ip, V4_PREFIX, V6_PREFIX);
   const patched = injectEcsIntoDnsMessage(dnsBytes, ecsOpt);
 
   // 统一用 POST 更稳（规避 GET 414 URI Too Long），并最小化 HTTP 头（Host/Content-Type/Accept）。:contentReference[oaicite:3]{index=3}
@@ -49,6 +58,7 @@ async function proxyWithECS(request, dnsBytes) {
     const ecsHuman = ecsOptionToHuman(ecsOpt);
     if (ecsHuman) h.set('X-ECS', ecsHuman);
   }
+  h.set('Access-Control-Allow-Origin', '*');
   return new Response(upstream.body, { status: upstream.status, headers: h });
 }
 
@@ -186,9 +196,15 @@ function ecsOptionToHuman(ecsOptData) {
 }
 function base64UrlToBytes(b64url) {
   const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(b64url.length / 4) * 4, '=');
-  const bin = atob(b64); const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  if (typeof atob === 'function') {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  // Node.js fallback
+  const buf = Buffer.from(b64, 'base64');
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 function ipv4ToBytes(ip) {
   const p = ip.split('.').map(x => parseInt(x, 10));

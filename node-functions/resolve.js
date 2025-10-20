@@ -3,15 +3,16 @@ const GOOGLE_DOH_JSON = 'https://dns.google/resolve';
 const V4_PREFIX = 24;
 const V6_PREFIX = 56;
 
-export async function onRequestGet({ request }) {
+export async function onRequestGet({ request, clientIp }) {
   const url = new URL(request.url);
-  const clientIp =
+  const ip =
+    (clientIp && String(clientIp).trim()) ||
     request.headers.get('EO-Connecting-IP')?.trim() ||
     request.headers.get('eo-connecting-ip')?.trim() ||
-    (request.eo && request.eo.clientIp) || ''; // 函数侧优先使用运行时提供的 clientIp。:contentReference[oaicite:5]{index=5}
+    '';
 
   // 生成 edns_client_subnet=addr/prefix
-  const ecs = buildEcsParam(clientIp);
+  const ecs = buildEcsParam(ip);
   const fwd = new URL(GOOGLE_DOH_JSON);
   url.searchParams.forEach((v, k) => fwd.searchParams.set(k, v));
   if (ecs) fwd.searchParams.set('edns_client_subnet', ecs);
