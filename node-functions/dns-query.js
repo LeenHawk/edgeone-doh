@@ -21,11 +21,23 @@ export async function onRequestGet({ request, clientIp, env }) {
 }
 
 export async function onRequestPost({ request, clientIp, env }) {
-  const ct = readHeader(request && request.headers, 'content-type') || '';
-  if (!ct.includes('application/dns-message')) {
-    return new Response('unsupported content-type', { status: 415 });
+  const ct = (readHeader(request && request.headers, 'content-type') || '').toLowerCase();
+  let dnsBytes;
+  try {
+    if (!ct || ct.includes('application/dns-message') || ct.includes('application/octet-stream')) {
+      dnsBytes = new Uint8Array(await request.arrayBuffer());
+    } else if (ct.includes('application/x-www-form-urlencoded')) {
+      const txt = await request.text();
+      const m = /(?:^|&)dns=([^&]*)/i.exec(txt);
+      if (!m) return new Response('missing dns param', { status: 400 });
+      dnsBytes = base64UrlToBytes(decodeURIComponent(m[1]));
+    } else {
+      // 容忍部分网关丢失/改写 content-type 的情况：尝试按二进制读取
+      dnsBytes = new Uint8Array(await request.arrayBuffer());
+    }
+  } catch (e) {
+    return new Response('bad request body', { status: 400 });
   }
-  const dnsBytes = new Uint8Array(await request.arrayBuffer());
   return proxyWithECS({ request, clientIp, env }, dnsBytes);
 }
 
