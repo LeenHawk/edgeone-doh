@@ -1,0 +1,19 @@
+{
+  "name": "edgeone-doh",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DoH proxy that injects EDNS Client Subnet (ECS) from EO-Connecting-IP",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --env-file=.env src/server.js",
+    "start": "node --env-file=.env src/server.js"
+  },
+  "dependencies": {
+    "dns-packet": "^5.6.1",
+    "fastify": "^4.28.1",
+    "ipaddr.js": "^2.2.0",
+    "undici": "^6.19.8"
+  }
+}
+
