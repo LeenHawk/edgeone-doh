@@ -4,7 +4,13 @@ const V4_PREFIX = 24;
 const V6_PREFIX = 56;
 
 export async function onRequestGet({ request, clientIp }) {
-  const url = new URL(request.url);
+  const rawUrl = request && request.url ? String(request.url) : '';
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    url = new URL(rawUrl || '/', getBaseFromHeaders(request.headers));
+  }
   const dnsParam = url.searchParams.get('dns');
   if (!dnsParam) return new Response('missing dns param', { status: 400 });
   const dnsBytes = base64UrlToBytes(dnsParam);
@@ -59,6 +65,7 @@ async function proxyWithECS(ctx, dnsBytes) {
     if (ecsHuman) h.set('X-ECS', ecsHuman);
   }
   h.set('Access-Control-Allow-Origin', '*');
+  h.set('Access-Control-Expose-Headers', 'X-ECS');
   return new Response(upstream.body, { status: upstream.status, headers: h });
 }
 
@@ -235,4 +242,12 @@ function bytesToIpv6(bytes) {
   for(let i=0;i<8;i++){ if(words[i]==='0'){ if(curStart===-1){curStart=i;curLen=1;}else curLen++; if(curLen>bestLen){bestLen=curLen;bestStart=curStart;} } else {curStart=-1;curLen=0;} }
   if(bestLen>1){ const left=words.slice(0,bestStart).join(':'), right=words.slice(bestStart+bestLen).join(':'); return (left?left:'')+'::'+(right?right:''); }
   return words.map(w=>w.replace(/^0+/,'')||'0').join(':');
+}
+
+function getBaseFromHeaders(headers){
+  try{
+    const proto=(headers.get('x-forwarded-proto')||headers.get('X-Forwarded-Proto')||'https').split(',')[0].trim()||'https';
+    const host=(headers.get('host')||headers.get('Host')||headers.get('x-forwarded-host')||'').split(',')[0].trim()||'localhost';
+    return `${proto}://${host}`;
+  }catch{ return 'https://localhost'; }
 }

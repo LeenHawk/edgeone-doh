@@ -4,7 +4,13 @@ const V4_PREFIX = 24;
 const V6_PREFIX = 56;
 
 export async function onRequestGet({ request, clientIp }) {
-  const url = new URL(request.url);
+  const rawUrl = request && request.url ? String(request.url) : '';
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    url = new URL(rawUrl || '/', getBaseFromHeaders(request.headers));
+  }
   const ip =
     (clientIp && String(clientIp).trim()) ||
     request.headers.get('EO-Connecting-IP')?.trim() ||
@@ -25,6 +31,7 @@ export async function onRequestGet({ request, clientIp }) {
   const h = new Headers(resp.headers);
   if (ecs) h.set('X-ECS', ecs);
   h.set('Access-Control-Allow-Origin', '*');
+  h.set('Access-Control-Expose-Headers', 'X-ECS');
   return new Response(resp.body, { status: resp.status, headers: h });
 }
 
@@ -46,3 +53,11 @@ function ipv6ToBytes(ip){const lastColon=ip.lastIndexOf(':');let tailV4=null,_ip
 let head=[],tail=[];if(_ip.includes('::')){const[h,t]=_ip.split('::');head=h?h.split(':').filter(Boolean):[];tail=t?t.split(':').filter(Boolean):[]}else{head=_ip.split(':').filter(Boolean);}if(head.length+tail.length>8)return null;const zeros=new Array(8-head.length-tail.length).fill('0');const full=[...head,...zeros,...tail].slice(0,8);if(tailV4){full[6]=((tailV4[0]<<8)|tailV4[1]).toString(16);full[7]=((tailV4[2]<<8)|tailV4[3]).toString(16);}const out=new Uint8Array(16);for(let i=0;i<8;i++){const v=parseInt(full[i]||'0',16);if(Number.isNaN(v)||v<0||v>0xffff)return null;out[i*2]=(v>>8)&0xff;out[i*2+1]=v&0xff;}return out;}
 function bytesToIpv6(bytes){const words=[];for(let i=0;i<16;i+=2)words.push(((bytes[i]<<8)|bytes[i+1]).toString(16));let bestStart=-1,bestLen=0,curStart=-1,curLen=0;for(let i=0;i<8;i++){if(words[i]==='0'){if(curStart===-1){curStart=i;curLen=1}else curLen++;if(curLen>bestLen){bestLen=curLen;bestStart=curStart}}else{curStart=-1;curLen=0}}if(bestLen>1){const left=words.slice(0,bestStart).join(':'),right=words.slice(bestStart+bestLen).join(':');return(left?left:'')+'::'+(right?right:'')}return words.map(w=>w.replace(/^0+/,'')||'0').join(':');}
 function maskIPv6ToPrefix(ip,prefix){const b=ipv6ToBytes(ip);if(!b)return'';const full=Math.floor(prefix/8),rem=prefix%8;for(let i=full+(rem?1:0);i<16;i++)b[i]=0;if(rem){const keepMask=0xff<<(8-rem);b[full]&=keepMask}return bytesToIpv6(b);}
+
+function getBaseFromHeaders(headers){
+  try{
+    const proto=(headers.get('x-forwarded-proto')||headers.get('X-Forwarded-Proto')||'https').split(',')[0].trim()||'https';
+    const host=(headers.get('host')||headers.get('Host')||headers.get('x-forwarded-host')||'').split(',')[0].trim()||'localhost';
+    return `${proto}://${host}`;
+  }catch{ return 'https://localhost'; }
+}
