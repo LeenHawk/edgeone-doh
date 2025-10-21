@@ -13,7 +13,7 @@ DoH 代理，基于请求头 `EO-Connecting-IP` 注入 EDNS Client Subnet (ECS) 
 在 Edge 运行（EdgeOne Pages Functions）
 -
 - 入口：
-  - `node-functions/dns-query.js`：DoH 二进制 `/dns-query`（Node 版，基于 `dns-packet` 注入 ECS）
+  - `functions/dns-query.js`：DoH 二进制 `/dns-query`（Edge 版，纯 Web API 注入 ECS）
   - `node-functions/resolve.js`：JSON `/resolve`（Node 版，传参 `edns_client_subnet`）
   - `node-functions/healthz.js`：健康检查 `/healthz`（Node 版）
 - 环境变量（通过平台配置绑定到 `env`）：
