@@ -13,14 +13,12 @@ DoH 代理，基于请求头 `EO-Connecting-IP` 注入 EDNS Client Subnet (ECS) 
 在 Edge 运行（EdgeOne Pages Functions）
 -
 - 入口：
-  - `functions/dns-query.js`：DoH 二进制 `/dns-query`（Edge 版，纯 Web API）
-  - `node-functions/resolve.js`：JSON `/resolve`（Node 版，转发至同一上游，注入同一 ECS）
-  - `functions/healthz.js`：健康检查 `/healthz`（Edge 版）
   - `node-functions/dns-query.js`：DoH 二进制 `/dns-query`（Node 版，基于 `dns-packet` 注入 ECS）
+  - `node-functions/resolve.js`：JSON `/resolve`（Node 版，传参 `edns_client_subnet`）
   - `node-functions/healthz.js`：健康检查 `/healthz`（Node 版）
 - 环境变量（通过平台配置绑定到 `env`）：
   - `UPSTREAM_DOH`：默认 `https://dns.google/dns-query`
-  - `UPSTREAM_RESOLVE`：默认 `https://dns.google/resolve`
+  - `UPSTREAM_JSON`：默认 `https://dns.google/resolve`
   - `ECS_V4_PREFIX`：默认 `24`
   - `ECS_V6_PREFIX`：默认 `56`
   - `CONNECTING_IP_HEADER`：默认 `EO-Connecting-IP`
@@ -76,7 +74,7 @@ curl http://127.0.0.1:8787/healthz
 -
 - 上游解析器对 ECS 支持不同。Google Public DNS 支持；Cloudflare 1.1.1.1 通常忽略 ECS。
 - 若依赖基于用户地理的解析命中，请选择支持 ECS 的上游（如 `dns.google`）。
-- 若发现 `/resolve` 与 `/dns-query` 结果不一致，通常是两者使用了不同上游或未共享同一 ECS。请统一 `UPSTREAM_RESOLVE` 与 `UPSTREAM_DOH`，并确认 `CONNECTING_IP_HEADER` 正常透传。Node 版 `/dns-query` 使用 `dns-packet` 改写 EDNS 以提升兼容性。
+- 若发现 `/resolve` 与 `/dns-query` 结果不一致，通常是两者使用了不同上游或未共享同一 ECS。请统一 `UPSTREAM_JSON` 与 `UPSTREAM_DOH`，并确认 `CONNECTING_IP_HEADER` 正常透传。Node 版 `/dns-query` 使用 `dns-packet` 改写 EDNS 以提升兼容性。
 
 EdgeOne Pages Functions 文档
 -
