@@ -43,31 +43,9 @@ async function handleRequest({ request, env, clientIp }) {
     return new Response('Method Not Allowed', { status: 405 })
   }
 
-  let origIp = pickClientIp(request.headers, cfg.CONNECTING_IP_HEADER, clientIp)
-  // Fallback: obtain ECS from Node Function /resolve when platform does not expose IP in Edge function
-  let forcedPrefix = null
-  if (!origIp) {
-    try {
-      const u = new URL('/resolve', url)
-      u.searchParams.set('name', 'example.com')
-      u.searchParams.set('type', 'A')
-      const ecsRes = await fetch(u.toString(), { method: 'GET' })
-      if (ecsRes.ok) {
-        // Prefer header
-        const ecsHdr = ecsRes.headers.get('X-ECS') || ecsRes.headers.get('x-ecs')
-        let ecsStr = ecsHdr || ''
-        if (!ecsStr) {
-          try { const j = await ecsRes.clone().json(); if (j && j.edns_client_subnet) ecsStr = j.edns_client_subnet } catch {}
-        }
-        if (ecsStr && ecsStr.includes('/')) {
-          const [ipStr, prefStr] = ecsStr.split('/')
-          origIp = ipStr
-          forcedPrefix = Number(prefStr)
-        }
-      }
-    } catch {}
-  }
-  const mutated = injectECSWithPrefix(dnsWire, origIp, cfg, forcedPrefix)
+  const origIp = pickClientIp(request.headers, cfg.CONNECTING_IP_HEADER, clientIp)
+  // Only inject when we have a public client IP; otherwise pass-through
+  const mutated = isPublicIp(origIp) ? injectECSWithPrefix(dnsWire, origIp, cfg, null) : dnsWire
 
   // Always POST to upstream to avoid URL length limits
   const upstreamRes = await fetch(cfg.UPSTREAM_DOH, {
@@ -84,7 +62,7 @@ async function handleRequest({ request, env, clientIp }) {
     'content-type': 'application/dns-message',
     'cache-control': 'no-store',
   })
-  const ecs = buildEcsHeader(origIp, cfg, forcedPrefix)
+  const ecs = isPublicIp(origIp) ? buildEcsHeader(origIp, cfg, null) : ''
   if (ecs) {
     h.set('X-ECS', ecs)
     h.set('Access-Control-Expose-Headers', 'X-ECS')
@@ -302,6 +280,54 @@ function buildEcsHeader(ip, cfg, forcedPrefix) {
     const masked = maskIPv4ToPrefix(ip, pref)
     return masked ? `${masked}/${pref}` : ''
   }
+}
+
+// ====== Public/Private IP helpers ======
+function isPublicIp(ip){
+  if (!ip) return false
+  if (ip.includes(':')) return isPublicIPv6(ip)
+  return isPublicIPv4(ip)
+}
+function isPublicIPv4(ip){
+  const b = ipv4ToBytes(ip)
+  if (!b) return false
+  const n = (b[0]<<24) | (b[1]<<16) | (b[2]<<8) | b[3]
+  const inRange = (base, mask) => (n & mask) === base
+  // 10.0.0.0/8
+  if (inRange(0x0a000000, 0xff000000)) return false
+  // 172.16.0.0/12
+  if (inRange(0xac100000, 0xfff00000)) return false
+  // 192.168.0.0/16
+  if (inRange(0xc0a80000, 0xffff0000)) return false
+  // 127.0.0.0/8
+  if (inRange(0x7f000000, 0xff000000)) return false
+  // 169.254.0.0/16
+  if (inRange(0xa9fe0000, 0xffff0000)) return false
+  // 100.64.0.0/10
+  if (inRange(0x64400000, 0xffc00000)) return false
+  // 0.0.0.0/8
+  if (inRange(0x00000000, 0xff000000)) return false
+  // 224.0.0.0/4 (multicast)
+  if ((b[0] & 0xf0) === 0xe0) return false
+  // 240.0.0.0/4 (reserved)
+  if ((b[0] & 0xf0) === 0xf0) return false
+  return true
+}
+function isPublicIPv6(ip){
+  const b = ipv6ToBytes(ip)
+  if (!b) return false
+  const b0 = b[0], b1 = b[1]
+  // ::/128 unspecified
+  if (b.every(x=>x===0)) return false
+  // ::1/128 loopback
+  if (b.slice(0,15).every(x=>x===0) && b[15]===1) return false
+  // fc00::/7 unique local
+  if ((b0 & 0xfe) === 0xfc) return false
+  // fe80::/10 link-local
+  if (b0 === 0xfe && (b1 & 0xc0) === 0x80) return false
+  // ff00::/8 multicast
+  if (b0 === 0xff) return false
+  return true
 }
 
 function ipv4ToBytes(ip){
