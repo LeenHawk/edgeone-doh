@@ -11,23 +11,27 @@ const DEFAULTS = {
   CONNECTING_IP_HEADER: 'EO-Connecting-IP',
 }
 
-export async function onRequestGet(context) {
-  return handleRequest(context)
-}
-
-export async function onRequestPost(context) {
-  return handleRequest(context)
-}
-
-export async function onRequestHead() {
-  // Health-like response for HEAD requests
-  return new Response(null, { status: 204, headers: { 'cache-control': 'no-store', 'access-control-allow-origin': '*' } })
+export async function onRequest(context) {
+  const { request } = context
+  const method = (request && request.method || 'GET').toUpperCase()
+  if (method === 'HEAD') {
+    return new Response(null, { status: 204, headers: { 'cache-control': 'no-store', 'access-control-allow-origin': '*' } })
+  }
+  if (method === 'GET' || method === 'POST') {
+    return handleRequest(context)
+  }
+  return new Response('Method Not Allowed', { status: 405 })
 }
 
 async function handleRequest({ request, env, clientIp }) {
   const cfg = loadConfig(env)
   const method = request.method.toUpperCase()
-  const url = new URL(request.url)
+  let url
+  try {
+    url = new URL(request.url)
+  } catch {
+    url = new URL(request.url || '/', getBaseFromHeaders(request && request.headers))
+  }
 
   let dnsWire
   if (method === 'GET') {
@@ -95,6 +99,14 @@ function json(obj, status = 200) {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' },
   })
+}
+
+function getBaseFromHeaders(headers){
+  try{
+    const proto=(headers.get('x-forwarded-proto')||'https').split(',')[0].trim()||'https'
+    const host=(headers.get('host')||headers.get('x-forwarded-host')||'').split(',')[0].trim()||'localhost'
+    return `${proto}://${host}`
+  }catch{ return 'https://localhost' }
 }
 
 function base64urlDecode(s) {
