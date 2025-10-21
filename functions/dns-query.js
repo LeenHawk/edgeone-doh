@@ -16,6 +16,13 @@ export async function onRequestPost(context) {
   return handleRequest(context)
 }
 
+export async function onRequestHead() {
+  return new Response(null, {
+    status: 204,
+    headers: { 'cache-control': 'no-store' },
+  })
+}
+
 async function handleRequest({ request, env }) {
   const cfg = loadConfig(env)
   const url = new URL(request.url)
@@ -321,4 +328,3 @@ function parseIPv6(str) {
   }
   return out
 }
-
