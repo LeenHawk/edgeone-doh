@@ -1,0 +1,31 @@
+// Node Functions endpoint to derive ECS from client IP
+// Route: /ecs
+
+const V4_PREFIX = 24
+const V6_PREFIX = 56
+
+export async function onRequestGet({ clientIp, env }) {
+  const v4p = env && env.ECS_V4_PREFIX ? Number(env.ECS_V4_PREFIX) : V4_PREFIX
+  const v6p = env && env.ECS_V6_PREFIX ? Number(env.ECS_V6_PREFIX) : V6_PREFIX
+
+  const ip = (clientIp && String(clientIp).trim()) || ''
+  const ecs = ip
+    ? (ip.includes(':') ? `${maskIPv6ToPrefix(ip, v6p)}/${v6p}` : `${maskIPv4ToPrefix(ip, v4p)}/${v4p}`)
+    : ''
+
+  const body = JSON.stringify({ ok: true, ip, ecs, v4Prefix: v4p, v6Prefix: v6p })
+  const h = new Headers()
+  if (ecs) h.set('X-ECS', ecs)
+  h.set('Access-Control-Allow-Origin', '*')
+  h.set('Access-Control-Expose-Headers', 'X-ECS')
+  h.set('content-type', 'application/json; charset=utf-8')
+  h.set('cache-control', 'no-store')
+  return new Response(body, { status: 200, headers: h })
+}
+
+function ipv4ToBytes(ip){const p=String(ip).split('.').map(x=>parseInt(x,10));if(p.length!==4||p.some(n=>Number.isNaN(n)||n<0||n>255))return null;return new Uint8Array([p[0],p[1],p[2],p[3]]);}
+function maskIPv4ToPrefix(ip,prefix){const b=ipv4ToBytes(ip);if(!b)return'';const mask=prefix===0?0:(~0<<(32-prefix))>>>0;const ipInt=(b[0]<<24)>>>0|(b[1]<<16)|(b[2]<<8)|b[3];const net=ipInt&mask;return[(net>>>24)&255,(net>>>16)&255,(net>>>8)&255,net&255].join('.')}
+function ipv6ToBytes(ip){const lastColon=ip.lastIndexOf(':');let tailV4=null,_ip=ip;if(ip.includes('.')&&lastColon!==-1){const v4=ip.slice(lastColon+1);const p=v4.split('.').map(x=>parseInt(x,10));if(p.length===4&&p.every(n=>n>=0&&n<=255)){tailV4=p;_ip=ip.slice(0,lastColon)+':0:0'}}let head=[],tail=[];if(_ip.includes('::')){const[h,t]=_ip.split('::');head=h?h.split(':').filter(Boolean):[];tail=t?t.split(':').filter(Boolean):[]}else{head=_ip.split(':').filter(Boolean)}if(head.length+tail.length>8)return null;const zeros=new Array(8-head.length-tail.length).fill('0');const full=[...head,...zeros,...tail].slice(0,8);if(tailV4){full[6]=((tailV4[0]<<8)|tailV4[1]).toString(16);full[7]=((tailV4[2]<<8)|tailV4[3]).toString(16)}const out=new Uint8Array(16);for(let i=0;i<8;i++){const v=parseInt(full[i]||'0',16);if(Number.isNaN(v)||v<0||v>0xffff)return null;out[i*2]=(v>>8)&0xff;out[i*2+1]=v&0xff}return out}
+function bytesToIpv6(bytes){const words=[];for(let i=0;i<16;i+=2)words.push(((bytes[i]<<8)|bytes[i+1]).toString(16));let bestStart=-1,bestLen=0,curStart=-1,curLen=0;for(let i=0;i<8;i++){if(words[i]==='0'){if(curStart===-1){curStart=i;curLen=1}else curLen++;if(curLen>bestLen){bestLen=curLen;bestStart=curStart}}else{curStart=-1;curLen=0}}if(bestLen>1){const left=words.slice(0,bestStart).join(':'),right=words.slice(bestStart+bestLen).join(':');return(left?left:'')+'::'+(right?right:'')}return words.map(w=>w.replace(/^0+/,'')||'0').join(':')}
+function maskIPv6ToPrefix(ip,prefix){const b=ipv6ToBytes(ip);if(!b)return'';const full=Math.floor(prefix/8),rem=prefix%8;for(let i=full+(rem?1:0);i<16;i++)b[i]=0;if(rem){const keepMask=0xff<<(8-rem);b[full]&=keepMask}return bytesToIpv6(b)}
+

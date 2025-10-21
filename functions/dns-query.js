@@ -43,8 +43,23 @@ async function handleRequest({ request, env, clientIp }) {
     return new Response('Method Not Allowed', { status: 405 })
   }
 
-  const origIp = pickClientIp(request.headers, cfg.CONNECTING_IP_HEADER, clientIp)
-  const mutated = injectECS(dnsWire, origIp, cfg)
+  let origIp = pickClientIp(request.headers, cfg.CONNECTING_IP_HEADER, clientIp)
+  // Fallback: call Node Function /ecs to obtain ECS when platform does not expose IP in Edge function
+  let forcedPrefix = null
+  if (!origIp) {
+    try {
+      const ecsRes = await fetch(new URL('/ecs', url).toString(), { method: 'GET' })
+      if (ecsRes.ok) {
+        const data = await ecsRes.json()
+        if (data && data.ip && data.ecs) {
+          origIp = data.ip
+          const slash = String(data.ecs).lastIndexOf('/')
+          if (slash !== -1) forcedPrefix = Number(data.ecs.slice(slash + 1))
+        }
+      }
+    } catch {}
+  }
+  const mutated = injectECSWithPrefix(dnsWire, origIp, cfg, forcedPrefix)
 
   // Always POST to upstream to avoid URL length limits
   const upstreamRes = await fetch(cfg.UPSTREAM_DOH, {
@@ -61,7 +76,7 @@ async function handleRequest({ request, env, clientIp }) {
     'content-type': 'application/dns-message',
     'cache-control': 'no-store',
   })
-  const ecs = buildEcsHeader(origIp, cfg)
+  const ecs = buildEcsHeader(origIp, cfg, forcedPrefix)
   if (ecs) {
     h.set('X-ECS', ecs)
     h.set('Access-Control-Expose-Headers', 'X-ECS')
@@ -204,12 +219,14 @@ function buildEcsOption(ipBytes, family, sourcePrefixLength) {
   return concatUint8(code, len, optData)
 }
 
-function injectECS(buf, clientIp, cfg) {
+function injectECSWithPrefix(buf, clientIp, cfg, forcedPrefix) {
   if (!clientIp) return buf
   const ip = parseIp(clientIp)
   if (!ip) return buf
   const family = ip.family
-  const srcPrefix = family === 1 ? cfg.ECS_V4_PREFIX : cfg.ECS_V6_PREFIX
+  const srcPrefix = (typeof forcedPrefix === 'number' && !Number.isNaN(forcedPrefix))
+    ? forcedPrefix
+    : (family === 1 ? cfg.ECS_V4_PREFIX : cfg.ECS_V6_PREFIX)
 
   const { ar, additionalStart } = findSections(buf)
   const addRecs = parseAdditionalRecords(buf, additionalStart, ar)
@@ -266,14 +283,16 @@ function injectECS(buf, clientIp, cfg) {
   return newBuf
 }
 
-function buildEcsHeader(ip, cfg) {
+function buildEcsHeader(ip, cfg, forcedPrefix) {
   if (!ip) return ''
   if (ip.includes(':')) {
-    const masked = maskIPv6ToPrefix(ip, Number(cfg.ECS_V6_PREFIX) | 0)
-    return masked ? `${masked}/${cfg.ECS_V6_PREFIX}` : ''
+    const pref = (typeof forcedPrefix === 'number' && !Number.isNaN(forcedPrefix)) ? forcedPrefix : (Number(cfg.ECS_V6_PREFIX) | 0)
+    const masked = maskIPv6ToPrefix(ip, pref)
+    return masked ? `${masked}/${pref}` : ''
   } else {
-    const masked = maskIPv4ToPrefix(ip, Number(cfg.ECS_V4_PREFIX) | 0)
-    return masked ? `${masked}/${cfg.ECS_V4_PREFIX}` : ''
+    const pref = (typeof forcedPrefix === 'number' && !Number.isNaN(forcedPrefix)) ? forcedPrefix : (Number(cfg.ECS_V4_PREFIX) | 0)
+    const masked = maskIPv4ToPrefix(ip, pref)
+    return masked ? `${masked}/${pref}` : ''
   }
 }
 
