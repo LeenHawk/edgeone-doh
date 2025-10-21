@@ -100,6 +100,12 @@ function json(obj, status = 200) {
 function base64urlDecode(s) {
   const pad = s.length % 4 === 2 ? '==' : s.length % 4 === 3 ? '=' : ''
   const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + pad
+  // Node Functions run in Node.js runtime (no atob). Use Buffer when available.
+  if (typeof Buffer !== 'undefined') {
+    const buf = Buffer.from(b64, 'base64')
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
+  }
+  // Fallback to atob in edge-like runtimes
   const bin = atob(b64)
   const out = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
