@@ -43,7 +43,7 @@ async function handleRequest({ request, env, clientIp }) {
     return new Response('Method Not Allowed', { status: 405 })
   }
 
-  const origIp = pickClientIp(request.headers, cfg.CONNECTING_IP_HEADER, clientIp)
+  const origIp = pickClientIpFromRequest(request, cfg.CONNECTING_IP_HEADER, clientIp)
   // Only inject when we have a public client IP; otherwise pass-through
   const mutated = isPublicIp(origIp) ? injectECSWithPrefix(dnsWire, origIp, cfg, null) : dnsWire
 
@@ -79,15 +79,24 @@ function loadConfig(env) {
   }
 }
 
-function pickClientIp(headers, headerName, contextIp) {
+function pickClientIpFromRequest(request, headerName, contextIp) {
+  // Priority: explicit context ip -> request.eo.clientIp -> EO-Connecting-IP header -> X-Forwarded-For
   if (contextIp && String(contextIp).trim()) return String(contextIp).trim()
-  const h = headerName.toLowerCase()
-  return (
-    headers.get(h) ||
-    headers.get('cf-connecting-ip') ||
-    (headers.get('x-forwarded-for') || '').split(',')[0].trim() ||
-    ''
-  )
+  try {
+    const eo = request && request.eo
+    if (eo && eo.clientIp) {
+      const ip = String(eo.clientIp).trim()
+      if (ip) return ip
+    }
+  } catch {}
+  const headers = request && request.headers
+  if (headers && typeof headers.get === 'function') {
+    const byHdr = headers.get(headerName) || headers.get(headerName.toLowerCase()) || headers.get('EO-Connecting-IP') || headers.get('eo-connecting-ip')
+    if (byHdr && String(byHdr).trim()) return String(byHdr).split(',')[0].trim()
+    const xff = (headers.get('x-forwarded-for') || '').split(',')[0].trim()
+    if (xff) return xff
+  }
+  return ''
 }
 
 function json(obj, status = 200) {
