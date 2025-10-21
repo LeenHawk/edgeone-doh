@@ -44,17 +44,25 @@ async function handleRequest({ request, env, clientIp }) {
   }
 
   let origIp = pickClientIp(request.headers, cfg.CONNECTING_IP_HEADER, clientIp)
-  // Fallback: call Node Function /ecs to obtain ECS when platform does not expose IP in Edge function
+  // Fallback: obtain ECS from Node Function /resolve when platform does not expose IP in Edge function
   let forcedPrefix = null
   if (!origIp) {
     try {
-      const ecsRes = await fetch(new URL('/ecs', url).toString(), { method: 'GET' })
+      const u = new URL('/resolve', url)
+      u.searchParams.set('name', 'example.com')
+      u.searchParams.set('type', 'A')
+      const ecsRes = await fetch(u.toString(), { method: 'GET' })
       if (ecsRes.ok) {
-        const data = await ecsRes.json()
-        if (data && data.ip && data.ecs) {
-          origIp = data.ip
-          const slash = String(data.ecs).lastIndexOf('/')
-          if (slash !== -1) forcedPrefix = Number(data.ecs.slice(slash + 1))
+        // Prefer header
+        const ecsHdr = ecsRes.headers.get('X-ECS') || ecsRes.headers.get('x-ecs')
+        let ecsStr = ecsHdr || ''
+        if (!ecsStr) {
+          try { const j = await ecsRes.clone().json(); if (j && j.edns_client_subnet) ecsStr = j.edns_client_subnet } catch {}
+        }
+        if (ecsStr && ecsStr.includes('/')) {
+          const [ipStr, prefStr] = ecsStr.split('/')
+          origIp = ipStr
+          forcedPrefix = Number(prefStr)
         }
       }
     } catch {}
