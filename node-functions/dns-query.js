@@ -19,6 +19,11 @@ export async function onRequestPost(context) {
   return handleRequest(context)
 }
 
+export async function onRequestHead() {
+  // Health-like response for HEAD requests
+  return new Response(null, { status: 204, headers: { 'cache-control': 'no-store', 'access-control-allow-origin': '*' } })
+}
+
 async function handleRequest({ request, env, clientIp }) {
   const cfg = loadConfig(env)
   const method = request.method.toUpperCase()
