@@ -2,7 +2,7 @@
 // Route: /dns-query (GET with ?dns=... or POST with application/dns-message)
 // Reads client IP from context.clientIp or EO-Connecting-IP and injects EDNS CLIENT_SUBNET (RFC 7871)
 
-import * as dnsPacket from 'dns-packet'
+// No external deps to avoid platform packaging issues
 
 const DEFAULTS = {
   UPSTREAM_DOH: 'https://dns.google/dns-query',
@@ -124,47 +124,123 @@ function base64urlDecode(s) {
   return out
 }
 
-function injectECS(wire, ipStr, cfg) {
-  if (!ipStr) return wire
-  let pkt
-  try {
-    pkt = dnsPacket.decode(wire)
-  } catch {
-    return wire
+// ===== DNS wire helpers (from Edge version) =====
+function readU16(buf, off) { return (buf[off] << 8) | buf[off + 1] }
+function writeU16BE(value) { return new Uint8Array([value >> 8, value & 0xff]) }
+function readU32(buf, off) { return (buf[off] * 2 ** 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3] }
+function skipName(buf, off) {
+  let o = off
+  while (o < buf.length) {
+    const len = buf[o]
+    if (len === 0) return o + 1
+    if ((len & 0xc0) === 0xc0) return o + 2
+    o += 1 + len
+  }
+  return o
+}
+function skipQuestion(buf, off) { const endName = skipName(buf, off); return endName + 4 }
+function skipRR(buf, off) { const endName = skipName(buf, off); const rdlen = readU16(buf, endName + 8); return endName + 10 + rdlen }
+function findSections(buf) {
+  const qd = readU16(buf, 4), an = readU16(buf, 6), ns = readU16(buf, 8), ar = readU16(buf, 10)
+  let off = 12
+  for (let i = 0; i < qd; i++) off = skipQuestion(buf, off)
+  for (let i = 0; i < an; i++) off = skipRR(buf, off)
+  for (let i = 0; i < ns; i++) off = skipRR(buf, off)
+  const additionalStart = off
+  return { qd, an, ns, ar, additionalStart }
+}
+function parseAdditionalRecords(buf, arStart, arCount) {
+  const recs = []
+  let off = arStart
+  for (let i = 0; i < arCount; i++) {
+    const nameStart = off
+    const nameEnd = skipName(buf, off)
+    const type = readU16(buf, nameEnd)
+    const klass = readU16(buf, nameEnd + 2)
+    const ttl = readU32(buf, nameEnd + 4)
+    const rdlen = readU16(buf, nameEnd + 8)
+    const rdataStart = nameEnd + 10
+    const rdataEnd = rdataStart + rdlen
+    recs.push({ nameStart, nameEnd, type, klass, ttl, rdlen, rdataStart, rdataEnd })
+    off = rdataEnd
+  }
+  return recs
+}
+function concatUint8(...arrays) {
+  let len = 0; for (const a of arrays) len += a.length
+  const out = new Uint8Array(len); let off = 0
+  for (const a of arrays) { out.set(a, off); off += a.length }
+  return out
+}
+function buildEcsOption(ipBytes, family, sourcePrefixLength) {
+  const addrBytesCount = Math.ceil(sourcePrefixLength / 8)
+  const trimmed = new Uint8Array(addrBytesCount)
+  for (let i = 0; i < addrBytesCount; i++) trimmed[i] = ipBytes[i] || 0
+  const rem = sourcePrefixLength % 8
+  if (rem !== 0 && addrBytesCount > 0) {
+    const mask = 0xff << (8 - rem)
+    trimmed[addrBytesCount - 1] &= mask
+  }
+  const familyBytes = writeU16BE(family)
+  const optData = concatUint8(
+    familyBytes,
+    new Uint8Array([sourcePrefixLength & 0xff, 0 /* scopePrefixLength */]),
+    trimmed,
+  )
+  const code = writeU16BE(8)
+  const len = writeU16BE(optData.length)
+  return concatUint8(code, len, optData)
+}
+function injectECS(buf, clientIp, cfg) {
+  if (!clientIp) return buf
+  const ip = parseIp(clientIp)
+  if (!ip) return buf
+  const family = ip.family
+  const srcPrefix = family === 1 ? cfg.ECS_V4_PREFIX : cfg.ECS_V6_PREFIX
+
+  const { ar, additionalStart } = findSections(buf)
+  const addRecs = parseAdditionalRecords(buf, additionalStart, ar)
+  const ecsOpt = buildEcsOption(ip.bytes, family, srcPrefix)
+
+  const optIdx = addRecs.findIndex((r) => r.type === 41)
+  if (optIdx !== -1) {
+    const rec = addRecs[optIdx]
+    const options = []
+    let p = rec.rdataStart
+    while (p + 4 <= rec.rdataEnd) {
+      const code = readU16(buf, p)
+      const len = readU16(buf, p + 2)
+      const optStart = p
+      const optEnd = p + 4 + len
+      if (optEnd > rec.rdataEnd) break
+      if (code !== 8) options.push(buf.slice(optStart, optEnd))
+      p = optEnd
+    }
+    const newRdata = concatUint8(...options, ecsOpt)
+    const rdlenOffset = rec.nameEnd + 8
+    const head = buf.slice(0, rdlenOffset)
+    const newRdlen = writeU16BE(newRdata.length)
+    const suffix = buf.slice(rec.rdataEnd)
+    return concatUint8(head, newRdlen, newRdata, suffix)
   }
 
-  // Normalize and detect family
-  const isV6 = ipStr.includes(':')
-  const family = isV6 ? 2 : 1
-  const srcPrefix = isV6 ? cfg.ECS_V6_PREFIX : cfg.ECS_V4_PREFIX
+  // No OPT: append new OPT and bump ARCOUNT
+  const arCount = readU16(buf, 10)
+  const name = new Uint8Array([0x00])
+  const type = writeU16BE(41)
+  const udp = writeU16BE(4096)
+  const ttl = new Uint8Array([0, 0, 0, 0])
+  const rdata = ecsOpt
+  const rdlen = writeU16BE(rdata.length)
+  const optRecord = concatUint8(name, type, udp, ttl, rdlen, rdata)
 
-  // Ensure OPT additional record exists
-  pkt.additionals = pkt.additionals || []
-  let opt = pkt.additionals.find((r) => r.type === 'OPT')
-  if (!opt) {
-    opt = { type: 'OPT', name: '.', udpPayloadSize: 4096, flags: 0, options: [] }
-    pkt.additionals.push(opt)
-  } else {
-    opt.options = opt.options || []
-  }
-
-  // Remove existing ECS options
-  opt.options = opt.options.filter((o) => o.code !== 'CLIENT_SUBNET' && o.code !== 8)
-
-  // Add ECS
-  opt.options.push({
-    code: 'CLIENT_SUBNET',
-    family,
-    sourcePrefixLength: Number(srcPrefix) | 0,
-    scopePrefixLength: 0,
-    ip: ipStr,
-  })
-
-  try {
-    return dnsPacket.encode(pkt)
-  } catch {
-    return wire
-  }
+  const newBuf = new Uint8Array(buf.length + optRecord.length)
+  newBuf.set(buf, 0)
+  newBuf.set(optRecord, buf.length)
+  const newAR = arCount + 1
+  newBuf[10] = (newAR >> 8) & 0xff
+  newBuf[11] = newAR & 0xff
+  return newBuf
 }
 
 function buildEcsHeader(ip, cfg) {
